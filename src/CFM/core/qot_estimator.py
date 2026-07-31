@@ -196,7 +196,7 @@ class MultiCore_Parameters:
       self.a2 = 2*self.a1
       self.a3 = 3*self.a1
       self.wtr = 1.5*self.a1
-      L_s_km_vec = self.link.length_span
+      L_s_km_vec = self.link.length[0]
 
       # -------------------------------
       # Allocate arrays
@@ -285,17 +285,17 @@ class ISRSSolver:
 
             Pout_W_00, z_dis = SRS_effect_improved_FRP(
                   self.p.c,
-                  self.p.a_vec[nn],
-                  self.p.NA_vec[nn],
-                  self.p.f_ref_raman[nn],
+                  self.p.a_vec[0, nn],
+                  self.p.NA_vec[0, nn],
+                  self.p.f_ref_raman[0, nn],
                   10 ** (self.p.P_in_dBm[nn, :] / 10) * 1e-3,
                   self.p.CCFV,
                   self.p.nuu,
-                  self.p.C_R[nn],
-                  self.p.f_C_R[nn],
+                  self.p.C_R[0],
+                  self.p.f_C_R[0],
                   2 * alpha_0_vec_freq_dep,
                   self.p.deltaz,
-                  self.p.L_s_km_vec
+                  self.p.L_s_km_vec[0]
             )
             self.p.P_in_dBm[self.p.N_ss, :] = 10 * np.ones((1, self.p.N_c))
             Pout_dBm_00 = np.flip(10 * np.log10(Pout_W_00 * 1e3), axis=0)
