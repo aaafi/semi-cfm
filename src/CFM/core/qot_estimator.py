@@ -3,6 +3,7 @@ from scipy.io import loadmat
 import math
 from scipy.special import factorial
 from scipy.special import erfcinv
+from CFM.core.edfa import EdfaConfig
 from CFM.utils.SRS_effect_improved import SRS_effect_improved_FLP, SRS_effect_improved_FRP
 from CFM.utils.SRS_effect import SRS_effect
 from CFM.utils.calc_opt_all_param_ISRS import calc_opt_all_param_ISRS
@@ -23,46 +24,94 @@ class ParameterBuilder:
    """
 
    def __init__(self, 
-                link,
-                bands,
-                P_in,
-                grid_center,
-                workspace_Raman_Gain_effi=workspace_Raman_Gain_effi,
-                alpha_dB_LCS=np.full((1, 1), 0.2),
-                max_input_limiation=6,
-                PHI = 13/21,
-                G_booster_dB = 15.0,  # <-- Added Booster Gain
-                F_booster_dB = 5.5):  # <-- Added Booster Noise Figure
+               link,
+               bands,
+               P_in,
+               grid_center,
+               Edfa: list[EdfaConfig] = None, # Made optional for ideal mode
+               booster: EdfaConfig = None,
+               P_in_is_tx_power: bool = False,
+               workspace_Raman_Gain_effi=workspace_Raman_Gain_effi,
+               alpha_dB_LCS=np.full((1, 1), 0.2),
+               max_input_limiation=6,
+               PHI=13/21):
 
       self.link = link
       self.bands = bands
       self.alpha_dB_LCS = alpha_dB_LCS
       self.grid_center = grid_center
       self.workspace_Raman_Gain_effi = workspace_Raman_Gain_effi
-      self.P_in = P_in
       self.max_input_limiation = max_input_limiation
       self.PHI = PHI
       
-      self.G_booster_dB = G_booster_dB
-      self.F_booster_dB = F_booster_dB
-
-      self._build()
-
-      self.link = link
-      self.bands = bands
-      self.alpha_dB_LCS = alpha_dB_LCS
-      self.grid_center = grid_center
-      self.workspace_Raman_Gain_effi = workspace_Raman_Gain_effi
+      self.Edfa = Edfa
+      self.booster = booster
+      self.P_in_is_tx_power = P_in_is_tx_power
       self.P_in = P_in
-      self.max_input_limiation = max_input_limiation
-      self.PHI = PHI
 
       self._build()
+
+   def _init_power_matrix(self):
+      """
+      Robustly parses self.P_in into the (N_ss + 1, N_c) P_in_dBm matrix.
+      If physical EDFAs are provided, it only populates the first row (span 0), 
+      leaving subsequent rows to be calculated by ISRSSolver.
+      """
+      P_in_arr = np.array(self.P_in)
+      self.ideal_power_management = False
+      self.P_in_dBm = np.zeros((self.N_ss + 1, self.N_c))
+
+      def apply_booster(raw_p):
+         if self.booster is not None and self.P_in_is_tx_power:
+               return raw_p + self.booster.gain_target
+         return raw_p
+
+      # Scenario 1: Scalar
+      if P_in_arr.ndim == 0:
+         launch_p = apply_booster(float(P_in_arr))
+         if self.Edfa is None:
+               self.ideal_power_management = True
+               self.P_in_dBm[:, :] = launch_p  # Apply to all spans
+         else:
+               self.P_in_dBm[0, :] = launch_p  # Apply ONLY to first span
+
+      # Scenarios 2 & 3: 1D Array
+      elif P_in_arr.ndim == 1:
+         if len(P_in_arr) == self.N_c and len(P_in_arr) != self.N_ss:
+               # Per-Channel Array (Length Nc)
+               launch_p = apply_booster(P_in_arr)
+               if self.Edfa is None:
+                  self.ideal_power_management = True
+                  for i in range(self.N_ss + 1):
+                     self.P_in_dBm[i, :] = launch_p
+               else:
+                  self.P_in_dBm[0, :] = launch_p
+                  
+         elif len(P_in_arr) in [self.N_ss, self.N_ss + 1]:
+               # Ideal Power per span
+               self.ideal_power_management = True
+               for i in range(len(P_in_arr)):
+                  self.P_in_dBm[i, :] = P_in_arr[i]
+               if len(P_in_arr) == self.N_ss:
+                  self.P_in_dBm[-1, :] = P_in_arr[-1]
+         else:
+               raise ValueError(f"1D P_in length {len(P_in_arr)} must match N_c ({self.N_c}) or N_ss ({self.N_ss})")
+
+      # Scenario 4: 2D Matrix (N_ss x N_c)
+      elif P_in_arr.ndim == 2:
+         if P_in_arr.shape[0] in [self.N_ss, self.N_ss + 1] and P_in_arr.shape[1] == self.N_c:
+               self.ideal_power_management = True
+               self.P_in_dBm[:P_in_arr.shape[0], :] = P_in_arr
+               if P_in_arr.shape[0] == self.N_ss:
+                  self.P_in_dBm[-1, :] = P_in_arr[-1, :]
+         else:
+               raise ValueError(f"2D P_in shape {P_in_arr.shape} is invalid. Expected ({self.N_ss}, {self.N_c})")
+      else:
+         raise ValueError(f"P_in has too many dimensions ({P_in_arr.ndim}).")
+
 
    def _build(self):
-
-      #self.N_ss = self.link.num_span
-      self.N_ss = self.link.num_span #We assume all spans length are equal
+      self.N_ss = self.link.num_span
       self.N_c = len(self.grid_center)
       self.nuu = self.link.link_params.nuu
 
@@ -76,6 +125,7 @@ class ParameterBuilder:
                self.alpha_dB_per_km_vec = self.alpha_dB_LCS
 
       self.alpha_dB_per_km_vec = self.alpha_dB_per_km_vec * np.ones((self.N_ss, 1))
+      
       # General parameters
       self.ro_coh = 0
       self.ro_MCI = 0
@@ -87,7 +137,7 @@ class ParameterBuilder:
 
       self.lambda_nm = self.link.link_params.lambda_nm
 
-      # Fiber link parameter vectorization (exactly same as in CFM)
+      # Fiber link parameter vectorization
       self.n2_vec = self.link.link_params.factor_gamma * self.link.link_params.n2 * np.ones((1, self.N_ss))
       self.n2 = self.link.link_params.n2
       self.NA_vec = self.link.link_params.NA * np.ones((1, self.N_ss))
@@ -108,7 +158,6 @@ class ParameterBuilder:
       self.ECFV = self.CCFV + 0.5 * self.CH_BR_vec * (1 + self.roll_off_vec)
       self.nuu_vec = self.grid_center
 
-      # Modulation format vectors
       self.PHI = self.PHI * np.ones((1, self.N_c))
       self.SAI = (-5548 / 3087) * np.ones((1, self.N_c))
 
@@ -123,10 +172,21 @@ class ParameterBuilder:
       self.m_pow = 2
       self.opt_loop = 6
 
-      # Noise
+      # 1. Map Noise Figures strictly from the Band objects
       self.noise_figure_LCS = np.concatenate([b.noise_figure * np.ones(b.num_channels) for b in self.bands])
-      self.F11_dB = self.noise_figure_LCS
-      self.F_dB = np.ones((self.N_ss, 1)) * self.F11_dB
+      self.F_dB = np.ones((self.N_ss, 1)) * self.noise_figure_LCS
+      
+      # 2. Extract EDFA Gains (if provided)
+      self.Amp_Gain_Profile_dB = np.zeros((self.N_ss, self.N_c), dtype="float")
+      freq_norm = (self.nuu_vec - np.mean(self.nuu_vec)) / (np.max(self.nuu_vec) - np.min(self.nuu_vec))
+      
+      if self.Edfa is not None:
+         if len(self.Edfa) != self.N_ss:
+               raise ValueError(f"Expected {self.N_ss} Edfa configs, got {len(self.Edfa)}")
+         for nn in range(self.N_ss):
+               amp_config = self.Edfa[nn]
+               tilt_profile_dB = amp_config.tilt_target * freq_norm
+               self.Amp_Gain_Profile_dB[nn, :] = amp_config.gain_target + tilt_profile_dB - amp_config.out_voa
 
       # Initialize result arrays
       self.z_max_pos = np.empty((self.N_ss,), dtype="float")
@@ -138,237 +198,107 @@ class ParameterBuilder:
       self.G_tot_dB = np.empty((self.N_ss, self.N_c), dtype="float")
 
       self.L_s_km_vec = self.link.length
-      self.P_in_dBm = self.P_in* np.ones((self.N_ss + 1, self.N_c))
-      if isinstance(self.P_in, (float, np.floating)):
-         self.P_in_dBm = self.P_in * np.ones((self.N_ss + 1, self.N_c))
+      
+      # 3. Construct the Power Matrix safely
+      self._init_power_matrix()
 
    def reset(self):
-      if isinstance(self.P_in, (float, np.floating)):
-         self.P_in_dBm = self.P_in * np.ones((self.N_ss + 1, self.N_c))
-       
-
-class MultiCore_Parameters:
-
-   def __init__(
-         self,
-         link,
-         grid_center,
-         N_c,
-         core_pitch,
-         adjacent_core_vec,
-         r_bending=140e-3,
-         a1=4.5e-6
-      ):
-
-      # external inputs
-      self.link = link
-      self.grid_center = grid_center
-      self.N_c = N_c
-      self.Core_pitch = core_pitch
-      self.adjacent_core_vec = adjacent_core_vec
-      self.r_bending = r_bending
-      self.a1 = a1
-
-      # build all internal parameters
-      self._build()
-
-
-   def _build(self):
-
-      # -------------------------------
-      # General physical parameters
-      # -------------------------------
-      self.BER = 1.5e-2
-      self.Q_factor_BER = 20*np.log10(np.sqrt(2)*erfcinv(2*self.BER))
-
-      self.snr_penalty = 1
-      self.etta_MF = np.array([0.5, 1, 2/(2-np.sqrt(2)), 5, 10, 21])
-
-      self.ICXT_th_1dB = 10*np.log10(
-         (1 - 10**(-self.snr_penalty/10)) /
-         (self.etta_MF * 10**(self.Q_factor_BER/10))
-      )
-
-      # -------------------------------
-      # Fiber geometry
-      # -------------------------------
-      self.n1 = 1.45
-      self.a2 = 2*self.a1
-      self.a3 = 3*self.a1
-      self.wtr = 1.5*self.a1
-      L_s_km_vec = self.link.length[0]
-
-      # -------------------------------
-      # Allocate arrays
-      # -------------------------------
-      self.ic_xt_dB = np.zeros((len(self.adjacent_core_vec), self.N_c))
-      self.ic_xt = np.zeros((len(self.adjacent_core_vec), self.N_c))
-
-      # -------------------------------
-      # Compute core-to-core coupling
-      # -------------------------------
-      beta = 2*np.pi*self.grid_center / (self.n1 * 3e8)
-      k = 2*np.pi*self.grid_center / (3e8)
-
-      Core_pitch = self.Core_pitch
-
-      Delta1 = 0.35*self.n1 / 100
-
-      V1 = k*self.a1*self.n1*np.sqrt(2*Delta1)
-
-      Delta_W21 = 0.607*V1 + 0.608
-      W2 = 1.750*V1 - 0.388
-      W1 = W2 - Delta_W21
-
-      GAMMA = W1 / (W1 + (Delta_W21*self.wtr/Core_pitch))
-
-      U1_power2 = self.a1**2 * (k**2*self.n1**2 - beta**2)
-      K1W1 = np.sqrt(np.pi/(2*W1)) * np.exp(-W1)
-
-      k1 = np.sqrt(GAMMA)*np.sqrt(Delta1)/self.a1
-      k2 = U1_power2 / ((V1**3) * (K1W1**2))
-      k3 = np.sqrt((np.pi*self.a1)/(W1*Core_pitch))
-      k4 = np.exp(-(W1*Core_pitch + 2*Delta_W21*self.wtr)/self.a1)
-
-      self.kappa = k1*k2*k3*k4
-
-      # XT per unit length
-      self.h_XT = (
-         2*self.kappa**2 * self.r_bending / (beta*Core_pitch)
-      ) * np.ones((len(self.adjacent_core_vec), self.N_c))
-
-      self.h_XT_dBkm = 10*np.log10(self.h_XT * 1e3)
-
-      adj = np.array(self.adjacent_core_vec)[:, None]        # (5,1)
-      L = float(L_s_km_vec) * np.ones((1, self.N_c)) * 1e6   # shape (1, 268)
-
-      self.ic_xt = adj * self.h_XT * L
-      self.ic_xt_dB = 10 * np.log10(self.ic_xt)
-
-
-    
-
+      self._init_power_matrix()
 class ISRSSolver:
-   """
-   Calculator for ISRS parameters — identical to CFM.calc_ISRS_params()
-   """
+    """
+    Calculator for ISRS parameters — adapted to handle fixed EDFA gain profiles
+    """
 
-   def __init__(self, params, model='FLP'):
-      self.p = params
-      self.model = model
+    def __init__(self, params, model='FLP'):
+        self.p = params
+        self.model = model
 
-   def solve(self):
-      self.p.reset()
-      for nn in range(self.p.N_ss):
+    def solve(self):
+        self.p.reset()
+        for nn in range(self.p.N_ss):
 
-         alpha_0_vec_freq_dep = (self.p.alpha_dB_per_km_vec[nn, :]) / (20000 * np.log10(np.exp(1)))
+            alpha_0_vec_freq_dep = (self.p.alpha_dB_per_km_vec[nn, :]) / (20000 * np.log10(np.exp(1)))
 
-         if(self.model=='FLP'):
+            if self.model == 'FLP':
+               Pout_W_00, z_dis = SRS_effect_improved_FLP(
+                    self.p.c,
+                    self.p.a_vec[0, nn],
+                    self.p.NA_vec[0, nn],
+                    self.p.f_ref_raman[0, nn],
+                    10 ** (self.p.P_in_dBm[nn, :] / 10) * 1e-3,
+                    self.p.CCFV,
+                    self.p.nuu,
+                    self.p.C_R[0],
+                    self.p.f_C_R[0],
+                    2 * alpha_0_vec_freq_dep,
+                    self.p.deltaz,
+                    self.p.L_s_km_vec[0]
+               )
+               Pout_dBm_00 = 10 * np.log10(Pout_W_00 * 1e3)
+            
+            elif self.model == 'FRP':
+               Pout_W_00, z_dis = SRS_effect_improved_FRP(
+                    self.p.c,
+                    self.p.a_vec[0, nn],
+                    self.p.NA_vec[0, nn],
+                    self.p.f_ref_raman[0, nn],
+                    10 ** (self.p.P_in_dBm[nn, :] / 10) * 1e-3,
+                    self.p.CCFV,
+                    self.p.nuu,
+                    self.p.C_R[0],
+                    self.p.f_C_R[0],
+                    2 * alpha_0_vec_freq_dep,
+                    self.p.deltaz,
+                    self.p.L_s_km_vec[0]
+               )
+               self.p.P_in_dBm[self.p.N_ss, :] = 10 * np.ones((1, self.p.N_c))
+               Pout_dBm_00 = np.flip(10 * np.log10(Pout_W_00 * 1e3), axis=0)
 
-            Pout_W_00, z_dis = SRS_effect_improved_FLP(
-                  self.p.c,
-                  self.p.a_vec[0, nn],
-                  self.p.NA_vec[0, nn],
-                  self.p.f_ref_raman[0, nn],
-                  10 ** (self.p.P_in_dBm[nn, :] / 10) * 1e-3,
-                  self.p.CCFV,
-                  self.p.nuu,
-                  self.p.C_R[0],
-                  self.p.f_C_R[0],
-                  2 * alpha_0_vec_freq_dep,
-                  self.p.deltaz,
-                  self.p.L_s_km_vec[0]
-            )
-            Pout_dBm_00 = 10*np.log10(Pout_W_00 * 1e3)  # infact it is P_in
-         
-         elif(self.model=='FRP'):
-
-            Pout_W_00, z_dis = SRS_effect_improved_FRP(
-                  self.p.c,
-                  self.p.a_vec[0, nn],
-                  self.p.NA_vec[0, nn],
-                  self.p.f_ref_raman[0, nn],
-                  10 ** (self.p.P_in_dBm[nn, :] / 10) * 1e-3,
-                  self.p.CCFV,
-                  self.p.nuu,
-                  self.p.C_R[0],
-                  self.p.f_C_R[0],
-                  2 * alpha_0_vec_freq_dep,
-                  self.p.deltaz,
-                  self.p.L_s_km_vec[0]
-            )
-            self.p.P_in_dBm[self.p.N_ss, :] = 10 * np.ones((1, self.p.N_c))
-            Pout_dBm_00 = np.flip(10 * np.log10(Pout_W_00 * 1e3), axis=0)
-
-            if max(Pout_dBm_00[0, :]) > self.p.max_input_limiation:
+               if max(Pout_dBm_00[0, :]) > self.p.max_input_limiation:
                   print('Calculated input power is larger than max input limitation.')
                   return None, None, None
 
-         P_out_dBm = Pout_dBm_00[:, 0:self.p.N_c]
-         self.p.P_in_dBm[nn, :] = P_out_dBm[0, :]
+            P_out_dBm = Pout_dBm_00[:, 0:self.p.N_c]
 
-         z_max = np.empty((self.p.N_c,), dtype="int")
-         for hh1 in range(self.p.N_c):
-               z_max[hh1] = int(z_dis[min(np.argwhere(P_out_dBm[:, hh1] == max(P_out_dBm[:, hh1])))])
-         self.p.z_max_pos[nn] = np.mean(z_max)
+            z_max = np.empty((self.p.N_c,), dtype="int")
+            for hh1 in range(self.p.N_c):
+                z_max[hh1] = int(z_dis[np.argmax(P_out_dBm[:, hh1])])
+            self.p.z_max_pos[nn] = np.mean(z_max)
 
-         self.p.Loss_dB[nn, :] = (self.p.P_in_dBm[nn, :] - P_out_dBm[-1, :])
+            self.p.Loss_dB[nn, :] = (self.p.P_in_dBm[nn, :] - P_out_dBm[-1, :])
 
-         su1, su2, su3 = calc_opt_all_param_ISRS(
-               alpha_0_vec_freq_dep[0:(len(self.p.CCFV))],
-               self.p.deltaz,
-               P_out_dBm,
-               self.p.N_c,
-               z_dis,
-               self.p.m_pow,
-               self.p.opt_loop
-         )
+            su1, su2, su3 = calc_opt_all_param_ISRS(
+                alpha_0_vec_freq_dep[0:(len(self.p.CCFV))],
+                self.p.deltaz,
+                P_out_dBm,
+                self.p.N_c,
+                z_dis,
+                self.p.m_pow,
+                self.p.opt_loop
+            )
 
-         self.p.alfa_0[nn, :] = su1[0:self.p.N_c]
-         self.p.alfa_1[nn, :] = su2[0:self.p.N_c]
-         self.p.sigma[nn, :] = su3[0:self.p.N_c]
-         self.p.Gain_dB_vec[nn, :] = (self.p.P_in_dBm[nn + 1, :] - P_out_dBm[-1, :])
+            self.p.alfa_0[nn, :] = su1[0:self.p.N_c]
+            self.p.alfa_1[nn, :] = su2[0:self.p.N_c]
+            self.p.sigma[nn, :] = su3[0:self.p.N_c]
 
-         if nn == 0:
-               self.p.G_tot_dB[nn, :] = self.p.Gain_dB_vec[nn, :] - self.p.Loss_dB[nn, :]
-         else:
-               self.p.G_tot_dB[nn, :] = self.p.G_tot_dB[nn - 1, :] + self.p.Gain_dB_vec[nn, :] - self.p.Loss_dB[nn, :]
+            # EDFA physical gain applied per channel
+            if self.p.ideal_power_management:
+               # Mode: Ideal Matrix. 
+               # Gain becomes exactly the amount needed to hit the NEXT span's forced P_in.
+               self.p.Gain_dB_vec[nn, :] = self.p.P_in_dBm[nn + 1, :] - P_out_dBm[-1, :]
+            else:
+               # Mode: Physical EDFA configs. 
+               # Gain comes from config; P_in into next span is calculated.
+               self.p.Gain_dB_vec[nn, :] = self.p.Amp_Gain_Profile_dB[nn, :]
+               self.p.P_in_dBm[nn + 1, :] = P_out_dBm[-1, :] + self.p.Gain_dB_vec[nn, :]
 
-      return Pout_dBm_00, self.p.alfa_0, self.p.alfa_1, self.p.sigma
-   
-   def solve_Online(self):
-      z_dis, Pout_W_00 = SRS_effect(
-         self.p.P_in,
-         self.p.grid_center,
-         self.p.alpha_dB_per_km_vec[0],
-         self.p.f_ref_raman[0],
-         self.p.C_R[0]*1000,
-         self.p.f_C_R[0],
-         self.p.bands[0].channel_spacing*1e12,
-         self.p.deltaz/1000,
-         self.p.L_s_km_vec,
-         300000000,
-         self.p.NA_vec[0],
-         self.p.a_vec[0]
-      )      
+            # Accumulate the net deviation (ripple) along the cascade
+            if nn == 0:
+                self.p.G_tot_dB[nn, :] = self.p.Gain_dB_vec[nn, :] - self.p.Loss_dB[nn, :]
+            else:
+                self.p.G_tot_dB[nn, :] = self.p.G_tot_dB[nn - 1, :] + self.p.Gain_dB_vec[nn, :] - self.p.Loss_dB[nn, :]
 
-      alpha_0_vec_freq_dep = (self.p.alpha_dB_per_km_vec[0]) / (20000 * np.log10(np.exp(1)))
-      P_out_dBm = 10*np.log10(Pout_W_00 * 1e3)
-      su1, su2, su3 = calc_opt_all_param_ISRS(
-            alpha_0_vec_freq_dep[0:(len(self.p.CCFV))],
-            self.p.deltaz,
-            P_out_dBm,
-            self.p.N_c,
-            z_dis*1000,
-            self.p.m_pow,
-            self.p.opt_loop
-      )
-
-      self.p.alfa_0[0, :] = su1[0:self.p.N_c]
-      self.p.alfa_1[0, :] = su2[0:self.p.N_c]
-      self.p.sigma[0, :] = su3[0:self.p.N_c]
-
-      return self.p.alfa_0, self.p.alfa_1, self.p.sigma
+        return self.p.P_in_dBm, self.p.alfa_0, self.p.alfa_1, self.p.sigma
 
 class NLISolver:
 
@@ -690,87 +620,6 @@ class NLISolver:
       BW_eff = np.ones((N_s_max,1))*self.p.CH_BR_vec
       P_NLI = G_NLI*BW_eff
       return P_NLI
-   
-   def solve_online(self):
-      p = self.p
-      
-      N_c = p.N_c
-      Beta2 = p.betta2_ps_squared_per_km*1e-27
-      Beta3 = p.betta3_ps_cube_per_km*1e-39
-      Beta4 = p.betta4_ps_4_per_km
-      f_ref = p.bands[0].opt_params.f_ref
-      frequencies = p.grid_center
-      n2 = p.n2
-      c = p.c
-      A_eff = np.array([A_eff_2_D(f, 300000000, p.NA_vec[0], p.a_vec[0]) for f in frequencies])
-      R = p.bands[0].opt_params.Rs_mat
-      P = p.P_in
-      roll_off = p.bands[0].opt_params.rof
-      BW_ch = R * ( 1 + roll_off)
-      PHI = p.PHI[0]
-      
-      # ---- model coefficients ----
-      # 0-indexed in Python: a[0] = a1, ..., a[23] = a24
-      a = np.array([
-         +9.3143e-1, -7.7122e-1, +9.1090e-1, -1.4555e+1, # a1 to a4
-         +8.5816e-1, -9.9415e-1, +1.0812e0,  +5.2247e-3, # a5 to a8
-         +9.9313e-1, -1.8838e0,  +6.2974e-1, -1.1421e+1, # a9 to a12
-         +6.7368e-1, -1.1759e0,  +6.4482e-3, +1.8738e+5, # a13 to a16
-         +1.9527e+3, -2.0016e0,  -6.7997e-1, +2.0215e0,  # a17 to a20
-         -2.9781e-1, +5.5130e-1, -3.6718e-1, +1.1486e0   # a21 to a24
-      ])
-
-      # order of series expansion
-      M = np.zeros(N_c, dtype=int)
-      for i in range(N_c):
-         M[i] = int(np.fix(10 * np.abs(2 * self.alfa_1[0][i] / self.sigma[0][i]))) + 1
-
-      P_NLI = np.zeros(N_c)
-
-      for n in range(N_c):
-         summ = 0
-         for m in range(N_c):
-               for j in range(2): # j = 0, 1
-                  for k in range(M[n] + 1): # k = 0 to M[n]
-                     for q in range(M[n] + 1): # q = 0 to M[n]
-                           
-                           if m == n:
-                              beta2_acc = Beta2 * 1e24
-                              ro = (1 + a[22] * (roll_off**a[23])) * \
-                                    ( a[8] + a[9]*(PHI[m]**a[10]) + a[11]*(PHI[m]**a[12]) * \
-                                    (1 + a[13]*((BW_ch/(1+roll_off))**a[14]) + a[15] * \
-                                       ((abs(beta2_acc) + a[16])**a[17]) ) )
-                           else:
-                              beta2_acc = 0
-                              ro = (1 + a[18]*(roll_off**a[19]) + a[20]*(roll_off**a[21])) * \
-                                    ( a[0] + a[1]*(PHI[m]**a[2]) + a[3]*(PHI[m]**a[4]) * \
-                                    (1 + a[5]*((abs(beta2_acc) + a[6])**a[7])) )
-
-                           eff_dispersion = Beta2 + np.pi * Beta3 * (frequencies[m] + frequencies[n] - 2*f_ref) + \
-                                          (2 * (np.pi**2) / 3) * Beta4 * \
-                                          ( (frequencies[n] - f_ref)**2 + (frequencies[n] - f_ref)*(frequencies[m] - f_ref) + (frequencies[m] - f_ref)**2 )
-                              
-                           Gamma = (2 * np.pi * frequencies[n] * 2 * n2) / (c * (A_eff[n] + A_eff[m]))
-                           
-                           Si_arg = ((np.pi**2) * eff_dispersion * R * (frequencies[m] - frequencies[n] + (((-1)**j) * (R/2)))) / \
-                                    (2 * self.alfa_0[0][m] + k * self.sigma[0][m])
-                           Si = np.arcsinh(Si_arg)
-                           
-                           if m == n:
-                              delta_func = 1
-                           else:
-                              delta_func = 0
-                              
-                           term1 = (((Gamma * P[m])**2) * ro * (2 - delta_func) * np.exp(-4 * self.alfa_1[0][m] / self.sigma[0][m]) * ((-1)**j)) / \
-                                 (2 * np.pi * (R**2) * math.factorial(k) * math.factorial(q) * eff_dispersion * (4 * self.alfa_0[0][m] + (k + q) * self.sigma[0][m]))
-                                 
-                           term2 = (2 * self.alfa_1[0][m] / self.sigma[0][m]) ** (k + q)
-                           
-                           summ += term1 * term2 * Si
-                           
-         P_NLI[n] = (16.0 / 27.0) * P[n] * summ
-
-      return P_NLI
 
 class ASESolver:
 
@@ -793,16 +642,17 @@ class ASESolver:
       P_ASE=np.zeros((N_s,N_c))
 
       h=6.62607004e-34
+      # BOOSTER NOISE CALCULATION
       # --- BOOSTER NOISE CALCULATION ---
-      # Ensure booster parameters exist (falling back to defaults if not)
-      G_booster_dB = self.p.G_booster_dB
-      F_booster_dB = self.p.F_booster_dB
-      
-      F_booster_lin = 10 ** (F_booster_dB / 10)
-      G_booster_lin = 10 ** (G_booster_dB / 10)
-      
-      G_ASE_booster = h * self.p.nuu_vec * (G_booster_lin - 1) * F_booster_lin
-      # ---------------------------------
+      if self.p.booster is not None:
+         # Use the band-specific noise figure array for the booster as well
+         F_booster_lin = 10 ** (self.p.noise_figure_LCS / 10) #self.p.noise_figure_LCS
+         G_booster_lin = 10 ** (self.p.booster.gain_target / 10)
+            
+         # G_ASE_booster is now perfectly band-dependent
+         G_ASE_booster = h * self.p.nuu_vec * (G_booster_lin - 1) * F_booster_lin
+      else:
+         G_ASE_booster = np.zeros_like(self.p.nuu_vec)
 
       for n_s in range(N_s):
 
@@ -923,66 +773,3 @@ class OSNRCalculatorV2:
 
         return results
     
-
-
-class MultiSpanSystem:
-    """
-    Orchestrates the multi-span Closed-Form Model (CFM) simulation pipeline.
-    Replicates the main MATLAB script by sequentially chaining the physical solvers.
-    """
-    
-    def __init__(self, link, bands, P_in, grid_center, 
-                 multicore_params=None, isrs_model='FLP', **kwargs):
-        """
-        Initializes the pipeline with the required configuration arrays.
-        Accepts any additional **kwargs that ParameterBuilder requires.
-        """
-        self.params = ParameterBuilder(link, bands, P_in, grid_center, **kwargs)
-        self.multicore_params = multicore_params
-        self.isrs_model = isrs_model
-
-    def set_input_power(self, P_in):
-        """
-        Updates the input power for power-sweep simulations without re-instantiating.
-        """
-        self.params.P_in = P_in
-        self.params.reset()
-
-    def run(self):
-        """
-        Executes the complete multi-span calculations sequence.
-        Returns a dictionary containing the final OSNR arrays and intermediate results.
-        """
-        # Step 1: Solve ISRS for power evolution and attenuation parameters
-        isrs = ISRSSolver(self.params, model=self.isrs_model)
-        Pout_dBm_00, alfa_0, alfa_1, sigma = isrs.solve()
-        
-        if Pout_dBm_00 is None:
-            raise ValueError(f"ISRS simulation failed for P_in = {self.params.P_in} dBm.")
-
-        # Step 2: Calculate Nonlinear Interference (NLI) Noise
-        nli = NLISolver(self.params, alfa_0, alfa_1, sigma)
-        P_NLI = nli.solve()
-
-        # Step 3: Calculate Amplified Spontaneous Emission (ASE) Noise
-        ase = ASESolver(self.params)
-        P_ASE = ase.solve()
-
-        # Step 4: Calculate OSNR metrics
-        osnr = OSNRCalculatorV2(self.params, P_ASE, P_NLI, multicore_params=self.multicore_params)
-        results = osnr.compute()
-        
-        # Attach intermediate physical arrays for plotting or debugging
-        results['P_NLI'] = P_NLI
-        results['P_ASE'] = P_ASE
-        results['alfa_0'] = alfa_0
-        results['alfa_1'] = alfa_1
-        results['sigma'] = sigma
-        results['G_tot_dB'] = self.params.G_tot_dB
-        
-        return results
-
-
-
-
-
