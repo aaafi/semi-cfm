@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software in your academic work, please cite it using the following metadata."
+title: "Semi-CFM: Semi-Analytical Closed-Form Model for QoT Estimation in Multi-Band Optical Networks"
+version: 1.0.0
+date-released: 2026-09-16
+authors:
+  - family-names: "Afi"
+    given-names: "Ahmadreza"
+repository-code: "https://github.com/yourusername/semi-cfm"
+license: "MIT"

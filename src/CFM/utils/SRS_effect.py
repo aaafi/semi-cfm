@@ -1,36 +1,92 @@
+from typing import Tuple
 import numpy as np
 from scipy.integrate import solve_ivp
+from CFM.utils.A_eff import A_eff_2_D
 
-def SRS_effect(y0, frequencies, attenuation_dB_km, f_ref_raman,
-                C_R, f_C_R, channel_spacing, deltaz, Ls_km, c, NA, a):
-    """
-    Complete SRS solver with vectorized ODE function in Python.
-    Equivalent of the MATLAB version using SciPy's solve_ivp.
-    """
 
+def SRS_effect(y0: np.ndarray,
+               frequencies: np.ndarray,
+               attenuation_dB_km: np.ndarray,
+               f_ref_raman: float,
+               C_R: np.ndarray,
+               f_C_R: np.ndarray,
+               channel_spacing: float,
+               deltaz: float,
+               Ls_km: float,
+               c: float,
+               NA: float,
+               a: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Simulate forward channel power evolution under Inter-Channel Stimulated Raman Scattering (ISRS).
+
+    Solves the coupled ordinary differential equations governing forward power transfer
+    across WDM channels due to stimulated Raman scattering and fiber attenuation using
+    a vectorized Runge-Kutta solver (RK45).
+
+    Args:
+    ---------
+        y0 (np.ndarray):
+            Initial channel launch powers at z = 0 in Watts.
+        frequencies (np.ndarray):
+            Channel carrier center frequencies in Hz.
+        attenuation_dB_km (np.ndarray):
+            Fiber attenuation coefficient vector per channel in dB/km.
+        f_ref_raman (float):
+            Reference Raman pump frequency in Hz.
+        C_R (np.ndarray):
+            Normalized reference Raman gain efficiency coefficients.
+        f_C_R (np.ndarray):
+            Frequency grid corresponding to the reference Raman gain coefficients in Hz.
+        channel_spacing (float):
+            Frequency spacing between adjacent WDM channels in Hz.
+        deltaz (float):
+            Spatial step size along the fiber link in kilometers.
+        Ls_km (float):
+            Total physical link length in kilometers.
+        c (float):
+            Speed of light in vacuum in m/s.
+        NA (float):
+            Numerical aperture of the fiber core.
+        a (float):
+            Fiber core radius in meters.
+
+    Returns:
+    ---------
+        Tuple[np.ndarray, np.ndarray]:
+            - z (np.ndarray): Array of spatial distance evaluation coordinates in kilometers.
+            - Pout (np.ndarray): Spatial power evolution matrix across distance and channels
+              in Watts with shape (N_z, N_channels).
+
+    Example:
+    ---------
+    >>> import numpy as np
+    >>> from CFM.utils.SRS_effect import SRS_effect
+    >>> z, P_profile = SRS_effect(
+    ...     y0=p_launch_watts,
+    ...     frequencies=carrier_freqs,
+    ...     attenuation_dB_km=alpha_db,
+    ...     f_ref_raman=220e12,
+    ...     C_R=raman_gain,
+    ...     f_C_R=raman_freqs,
+    ...     channel_spacing=50e9,
+    ...     deltaz=0.2,
+    ...     Ls_km=80.0,
+    ...     c=299792458,
+    ...     NA=0.1182,
+    ...     a=4.3e-6
+    ... )
+    """
     y0 = np.array(y0).flatten()
     N = len(frequencies)
 
-    # =====================================================================
-    # DYNAMIC EFFECTIVE AREA CALCULATION (Marcuse Formula)
-    # =====================================================================
-    def A_eff_2_D(f_mat, c, NA, a):
-        # f_mat: frequency [Hz]
-        v = c / (2 * np.pi * a * NA * f_mat)
-        return np.pi * (a ** 2) * (0.65 + 1.619 * (v ** 1.5) + 2.879 * (v ** 6)) ** 2
-
     A_eff = np.array([A_eff_2_D(f, c, NA, a) for f in frequencies])
 
-    # A_eff_sample grid
     max_delta = N - 1
     A_eff_sample = np.zeros(max_delta + 1)
     for i in range(len(A_eff_sample)):
         f_sample = 219.96e12 - (i) * channel_spacing
         A_eff_sample[max_delta - i] = A_eff_2_D(f_sample, c, NA, a)
 
-    # =====================================================================
-    # Raman gain mapping via linear interpolation
-    # =====================================================================
     required_offsets = np.arange(1, max_delta + 1) * channel_spacing
 
     if np.mean(f_C_R) < 0:
@@ -44,9 +100,6 @@ def SRS_effect(y0, frequencies, attenuation_dB_km, f_ref_raman,
 
     raman_gain_sample = np.interp(query_points, f_C_R_sorted, C_R_sorted, left=0, right=0)
 
-    # =====================================================================
-    # Precompute Interaction Matrix M and Attenuation for Vectorized ODE
-    # =====================================================================
     M = np.zeros((N, N))
     for i in range(N):
         for j in range(N):
@@ -69,23 +122,14 @@ def SRS_effect(y0, frequencies, attenuation_dB_km, f_ref_raman,
                           ((A_eff[j] + A_eff[j - delta]) / 2))
                     M[i, j] = cr
 
-    # Ensure attenuation is a NumPy array for element-wise operations
     alpha = np.array(attenuation_dB_km) / 4.343
 
-    # =====================================================================
-    # Define the ODE system
-    # =====================================================================
-    def ode_raman(z, y):
-        # Vectorized implementation: 
-        # dydz_i = -alpha_i * y_i + y_i * sum_j(M_ij * y_j)
+    def ode_raman(z: float, y: np.ndarray) -> np.ndarray:
         return -alpha * y + y * (M @ y)
 
-    # =====================================================================
-    # Solve ODE with SciPy
-    # =====================================================================
     z_span = (0, Ls_km)
     z_eval = np.arange(0, Ls_km + deltaz, deltaz)
 
     sol = solve_ivp(ode_raman, z_span, y0, t_eval=z_eval, method='RK45', vectorized=False)
-    #solving the diff eq
+
     return sol.t, sol.y.T

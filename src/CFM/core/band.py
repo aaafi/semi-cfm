@@ -121,22 +121,31 @@ class OpticalParameters:
 
 class Band:
     """
-    Class representing an optical transmission band with its characteristics.
-    
-    Used in multi-band optical network planning. Stores frequency grid information
-    for the specified band (e.g., C-band, L-band), and provides utilities to 
-    compute the channel frequencies.
+    Class representing an optical transmission band with its spectral characteristics.
+
+    Provides frequency slot calculations and properties for multi-band optical 
+    network planning (e.g., C, L, S, E, or G bands).
 
     Attributes:
-        name (str): Band identifier (e.g., 'C', 'L')
-        start_freq (float): Start frequency in THz
-        end_freq (float): End frequency in THz
-        channel_spacing (float): Channel spacing in THz (default: 0.05 THz = 50 GHz)
-        spectrum (np.ndarray): Array of center frequencies for each channel
-        num_channels (int): Total number of channels in the band
-        
+    -----------
+        name (str): 
+            Band identifier (e.g., 'C', 'L', 'S', 'E', 'G').
+        start_freq (float): 
+            Start frequency of the transmission band in THz.
+        end_freq (float): 
+            End frequency of the transmission band in THz.
+        channel_spacing (float): 
+            Frequency spacing between adjacent channels in THz.
+        opt_params (OpticalParameters): 
+            Optical transmission and fiber parameters associated with the band.
+        noise_figure (float): 
+            Band-specific linear noise figure assigned from opt_params.
+        spectrum (np.ndarray): 
+            Array of optical carrier center frequencies in THz, ordered high to low.
+        num_channels (int): 
+            Total number of optical channels available in the band.
     """
-    
+
     def __init__(self, 
                  name: str,
                  start_freq: float,
@@ -144,35 +153,37 @@ class Band:
                  opt_params: OpticalParameters,
                  channel_spacing: float = 0.05):
         """
-        Initialize Band instance.
+        Initialize an optical transmission Band instance.
 
         Args:
         ---------
             name (str): 
-                Band name (e.g., 'C', 'L')
+                Band name (e.g., 'C', 'L', 'S', 'E', 'G').
             start_freq (float): 
-                Start frequency in THz
+                Starting frequency edge of the band in THz.
             end_freq (float): 
-                End frequency in THz
+                Ending frequency edge of the band in THz.
             opt_params (OpticalParameters): 
-                Optical transmission parameters
-            network_instance (Network): 
-                Reference to the associated network
+                Physical transmission and transceiver parameters.
             channel_spacing (float, optional): 
-                Frequency spacing between channels in THz
+                Frequency separation between channels in THz. Default is 0.05 THz (50 GHz).
+
+        Raises:
+        -------
+            ValueError: 
+                If start_freq is greater than or equal to end_freq, if channel_spacing is 
+                less than or equal to 0, or if an unrecognized band name is provided.
 
         Example:
-        --------    
-        >>> from sixgman.core.band import Band
-
-        >>> # Create C-band instance
+        ---------
+        >>> from CFM.core.band import Band, OpticalParameters
+        >>> c_params = OpticalParameters()
         >>> c_band = Band(
-        ... name = 'C', # Band name
-        ... start_freq = 190.65, # start frequency of this band in THz
-        ... end_freq = 196.675, # end frequency of this band in THz
-        ... opt_params = c_band_params, # the optical parameters instance
-        ... network_instance = net, # the network instance
-        ... channel_spacing = 0.05 # 50 GHz Channel spacing
+        ...     name='C',
+        ...     start_freq=191.3,
+        ...     end_freq=196.1,
+        ...     opt_params=c_params,
+        ...     channel_spacing=0.05
         ... )
         """
         if start_freq >= end_freq:
@@ -201,28 +212,21 @@ class Band:
         else:
             raise ValueError(f'Unknown band name: {self.name}')
 
-         
-    
-        # Computed attributes
         self.spectrum: np.ndarray = self.calc_spectrum()
         self.num_channels: int = len(self.spectrum)
-                               
+
     def calc_spectrum(self) -> np.ndarray:
         """
-        Compute the frequency grid (spectrum) for this band based on
-        start_freq, end_freq, and channel_spacing.
+        Calculate the discrete channel center frequencies across the band.
 
-        Output:
+        Returns:
         ---------
             np.ndarray: 
-                Array of center frequencies in THz.
+                Array of carrier center frequencies in THz, arranged descendingly.
 
         Example:
-        -------- 
-        >>> # define C-band frequency slots
-        >>> spectrum_C = c_band.calc_spectrum()
-        >>> # define total number of frequency slots
-        >>> num_fslots = len(spectrum_C)
+        ---------
+        >>> spectrum = c_band.calc_spectrum()
+        >>> num_channels = len(spectrum)
         """
-        return  np.flip(np.arange(self.start_freq, self.end_freq, step = self.channel_spacing))
-    
+        return np.flip(np.arange(self.start_freq, self.end_freq, step=self.channel_spacing))
